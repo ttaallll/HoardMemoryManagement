@@ -207,7 +207,7 @@ pBlockHeader allocateFromSuperblock(pSuperblock superblock, unsigned int sizeAll
 pSuperblock getFreeSuperblock(pSizeClass scGlobal) {
 	if (scGlobal->numOfSuperBlocks > 0) {
 
-		scGlobal->superblocks = scGlobal->superblocks->next;
+		scGlobal->superblocks = scGlobal->superblocks->next; // this is for removing the superblock from global, for not mistaken using it twice
 		scGlobal->numOfSuperBlocks -= 1;
 
 		return scGlobal->superblocks;
@@ -330,19 +330,22 @@ void * malloc2 (size_t sz)
 		} else {
 			/* if not, create one */
 
-			pSuperblock newSuperblock = createNewSuperblock(currentHeap);
+			// unlock global heap
+			// do it now for saving time before allocating memory non related to the global heap
+			unlockedGlobalHeap = 1;
 
-			currentHeap->all += SUPERBLOCK_SIZE;
-			currentHeap->sizeClass[currentSizeClass].numOfSuperBlocks++;
+
+			pSuperblock newSuperblock = createNewSuperblock(currentHeap);
 
 			// insert the new superblock to the head of the linked list of superblocks
 			newSuperblock->next = currentHeap->sizeClass[currentSizeClass].superblocks;
 			currentHeap->sizeClass[currentSizeClass].superblocks = newSuperblock;
 
-			superblock = newSuperblock;
 
-			// unlock global heap
-			unlockedGlobalHeap = 1;
+			currentHeap->all += SUPERBLOCK_SIZE;
+			currentHeap->sizeClass[currentSizeClass].numOfSuperBlocks++;
+
+			superblock = newSuperblock;
 
 		}
 
@@ -376,7 +379,9 @@ void free2 (void * ptr)
 
 	pBlockHeader blockHeader = (pBlockHeader)(ptr - sizeof(BlockHeader));
 
-	if (blockHeader->mSize > SUPERBLOCK_SIZE / 2)
+	unsigned int sizeToRemove = blockHeader->mSize;
+
+	if (sizeToRemove > SUPERBLOCK_SIZE / 2)
 	{
 		unsigned int size = blockHeader->mSize; // the size is the overall size, include the BlockHeader size
 		if (munmap(ptr - sizeof(BlockHeader), size) < 0)
@@ -392,7 +397,24 @@ void free2 (void * ptr)
 
 	// lock the heap
 
+	/* dealock from superblock */
+	pBlockHeaderNode blockHeaderNode = (pBlockHeaderNode)(blockHeader - sizeof(BlockHeaderNode));
+	blockHeaderNode->chunkSize += sizeToRemove;
 
+	// return the node to the free list
+	blockHeaderNode->next = superblockBelongs->freeList;
+	superblockBelongs->freeList = blockHeaderNode;
+
+	/* remove using from superblock and heap */
+	heapBelongs->using -= sizeToRemove;
+	superblockBelongs->using -= sizeToRemove;
+
+	/* check if we dealing with the global heap */
+	if (heapBelongs == globalHeap) {
+		// unlock global heap
+
+
+	}
 
 	DBGPRINTF("done myfree\n");
 	

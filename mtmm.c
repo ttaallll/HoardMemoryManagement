@@ -219,7 +219,7 @@ Superblock* getMostFullnessSuperblock(pSizeClass sc, unsigned int sizeNeedToAllo
 
 pBlockHeader allocateFromSuperblock(pSuperblock superblock, unsigned int sizeAllocation) {
 
-	pBlockHeader newBlock = (pBlockHeader)(superblock->freeList + sizeof(BlockHeaderNode));
+	pBlockHeader newBlock = (pBlockHeader)((void*)(superblock->freeList) + sizeof(BlockHeaderNode));
 	newBlock->mSize = sizeAllocation;
 	newBlock->superblockBelongs = superblock;
 
@@ -511,9 +511,9 @@ void * malloc (size_t sz)
 		}
 	}
 
-	EXTDBGPRINTF3V("got free superblock %d, using %d\n", (int)superblock, superblock->using);
+	EXTDBGPRINTF3V("got free superblock %p, using %d\n", (void*)superblock, superblock->using);
 	if (superblock->freeList != NULL) {
-		EXTDBGPRINTF3V("next free space of superblock %d is %d", (int)superblock, superblock->freeList->chunkSize);
+		EXTDBGPRINTF3V("next free space of superblock %p is %d", (void*)superblock, superblock->freeList->chunkSize);
 	}
 
 
@@ -571,7 +571,7 @@ void free (void * ptr)
 
 
 	/* dealloc from superblock */
-	pBlockHeaderNode blockHeaderNode = (pBlockHeaderNode)(blockHeader - sizeof(BlockHeaderNode));
+	pBlockHeaderNode blockHeaderNode = (pBlockHeaderNode)((void*)blockHeader - sizeof(BlockHeaderNode));
 	blockHeaderNode->chunkSize = sizeToRemove;
 
 	// return the node to the free list
@@ -598,8 +598,10 @@ void free (void * ptr)
 	/* we are not in the global */
 	/* check if the heap is almost empty */
 
-	if ((heapBelongs->using < heapBelongs->all - K * SUPERBLOCK_SIZE) &&
-			(heapBelongs->using < (1 - f) * heapBelongs->all)) {
+	if (
+			(heapBelongs->using < heapBelongs->all - K * SUPERBLOCK_SIZE) &&
+			(heapBelongs->using < (1 - f) * heapBelongs->all)
+		) {
 
 		int currentSizeClass;
 		int currentSizeClassPadded;
@@ -639,13 +641,9 @@ void * realloc (void * ptr, size_t sz)
 	}
 
 	pBlockHeader header = (pBlockHeader)((void*)ptr - sizeof(BlockHeader));
-
 	unsigned int minimumSize = header->mSize < sz ? header->mSize: sz;
-
 	void* ptrNew = malloc(minimumSize);
-
 	memcpy(ptrNew, ptr, minimumSize);
-
 	free(ptr);
 
 	return ptrNew;

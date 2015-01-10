@@ -9,10 +9,16 @@
 #include <sys/mman.h>
 #include <math.h>
 
-#define DEBUGPRINT 1
+#define EXTDEBUGPRINT 0
 
-#if DEBUGPRINT
-#define DBGPRINTF printf
+#if EXTDEBUGPRINT
+#define EXTDBGPRINTF printf
+#else
+#define EXTDBGPRINTF
+#endif
+
+#if 0
+#define DBGPRINTF printf("[%s]: ", __FUNCTION__);printf
 #else
 #define DBGPRINTF
 #endif
@@ -23,7 +29,7 @@
 #define SIZECLASSBASE 2
 
 float f = 0.75f;
-float K = 0;
+float K = 1;
 
 struct sSuperblock;
 struct sHeap;
@@ -146,7 +152,7 @@ void getCurrentSizeClass(int sz, int* currnetSizeClass, int* currentSizeClassPad
 	// maybe we can optimize this, not now
 	for(i = 0; i < NUMOFSIZECLASSES; ++i) {
 		int nextStage = pow(SIZECLASSBASE, i);
-		if (sz < nextStage) {
+		if (sz <= nextStage) {
 			*currnetSizeClass = i;
 			*currentSizeClassPadded = nextStage;
 			return;
@@ -225,13 +231,15 @@ pBlockHeader allocateFromSuperblock(pSuperblock superblock, unsigned int sizeAll
 pSuperblock getFreeSuperblockFromGlobal(pSizeClass scGlobal) {
 	if (scGlobal->numOfSuperBlocks > 0) {
 
-		scGlobal->superblocks = scGlobal->superblocks->next; // this is for removing the superblock from global, for not mistaken using it twice
-		scGlobal->numOfSuperBlocks--;
+		pSuperblock superblockToTransfer = scGlobal->superblocks;
 
 		globalHeap->all -= SUPERBLOCK_SIZE;
 		globalHeap->using -= scGlobal->superblocks->using;
 
-		return scGlobal->superblocks;
+		scGlobal->superblocks = scGlobal->superblocks->next; // this is for removing the superblock from global, for not mistaken using it twice
+		scGlobal->numOfSuperBlocks--;
+
+		return superblockToTransfer;
 	}
 
 	return NULL;
@@ -264,8 +272,13 @@ pSuperblock createNewSuperblock(pHeap heapBelongs) {
 /* add the superblock to the heap */
 void transferSuperblock(pHeap toHeap, pSuperblock superblockToMove, int sizeClass) {
 
+	DBGPRINTF("lock heap %d\n", (int)toHeap);
+
 	// lock heap toHeap
 	pthread_mutex_lock(&toHeap->mutex);
+
+	DBGPRINTF("heap %d locked\n", (int)toHeap);
+
 
 	toHeap->sizeClass[sizeClass].numOfSuperBlocks++;
 
@@ -276,8 +289,13 @@ void transferSuperblock(pHeap toHeap, pSuperblock superblockToMove, int sizeClas
 	toHeap->all += SUPERBLOCK_SIZE;
 	toHeap->using += superblockToMove->using;
 
+
+	DBGPRINTF("unlock heap %d\n", (int)toHeap);
+
 	// unlock heap toHeap
 	pthread_mutex_unlock(&toHeap->mutex);
+
+	DBGPRINTF("unlocked heap %d\n", (int)toHeap);
 }
 
 /* this function removes superblock from the heap and return it, it gives the minimum allocated superblock */
@@ -301,6 +319,7 @@ pSuperblock getTheMostEmptySuperblock(pHeap fromHeap, unsigned int sizeClassNum)
 
 	currentSuperblock = sizeClass->superblocks;
 	previousSuperblock = NULL;
+	previousMinFullnessSuperblock = NULL;
 
 	for (i = 1; i < sizeClass->numOfSuperBlocks; ++i) {
 		previousSuperblock = currentSuperblock;
@@ -333,11 +352,9 @@ pSuperblock getTheMostEmptySuperblock(pHeap fromHeap, unsigned int sizeClassNum)
 
 void * malloc2 (size_t sz)
 {
-	DBGPRINTF("start mymalloc\n");
+	DBGPRINTF("start mymalloc - %d\n", (unsigned int)sz);
 
 	initHoard();
-
-	DBGPRINTF("got size for allocation - %d\n", (unsigned int)sz);
 
 	if (sz > SUPERBLOCK_SIZE / 2) {
 
@@ -363,25 +380,25 @@ void * malloc2 (size_t sz)
 
 	  	((BlockHeader *) p) -> mSize = sz;
 
-	  	DBGPRINTF("created big mmap for the request\n");
+	  	EXTDBGPRINTF("created big mmap for the request\n");
 	  	return (p + sizeof(BlockHeader));
 	}
 
 	DBGPRINTF("small size - allocate in superblock\n");
 
-	DBGPRINTF("getting heap\n");
+	EXTDBGPRINTF("getting heap\n");
 
 	int currentHeapI = getCurrentHeapI();
 	pHeap currentHeap = &hoard.heaps[currentHeapI];
 
-	DBGPRINTF("found heap %d\n", currentHeapI);
+	EXTDBGPRINTF("found heap %d\n", currentHeapI);
 
 	DBGPRINTF("lock heap %d\n", currentHeapI);
 
 	// lock heap i
 	pthread_mutex_lock(&currentHeap->mutex);
 
-	DBGPRINTF("heap %d locked\n", currentHeapI);
+	DBGPRINTF("locked heap %d\n", currentHeapI);
 
 
 	int currentSizeClass;
@@ -392,31 +409,43 @@ void * malloc2 (size_t sz)
 
 	getCurrentSizeClass(sz, &currentSizeClass, &currentSizeClassPadded);
 
-	DBGPRINTF("current size class %d - size padded %d\n", currentSizeClass, currentSizeClassPadded);
+	EXTDBGPRINTF("current size class %d - size padded %d\n", currentSizeClass, currentSizeClassPadded);
 
 	SizeClass* sc = getSizeClass(currentHeap, currentSizeClass);
 
+
+	EXTDBGPRINTF("try to get superblock with space for allocation");
 	Superblock* superblock = getMostFullnessSuperblock(sc, currentSizeClassPadded);
 
 	if (superblock == NULL) {
 		/* there is no superblock at all, we need to get one */
 
+		EXTDBGPRINTF("we didnt find one");
+
 		/* check if we have available from global */
+
+		DBGPRINTF("lock global heap\n");
 
 		// lock global heap
 		pthread_mutex_lock(&globalHeap->mutex);
 
+		DBGPRINTF("locked global heap\n");
+
 		char unlockedGlobalHeap = 0; // boolean for know if we unlocked the global heap
 
+		EXTDBGPRINTF("try to find free superblock from global heap\n");
 
 		SizeClass* scGlobal = getSizeClass(globalHeap, currentSizeClass);
 		pSuperblock sbForTransfer = getFreeSuperblockFromGlobal(scGlobal);
 
 		if (sbForTransfer != NULL) {
-			globalHeap->using -= sbForTransfer->using;
+
+			EXTDBGPRINTF("found free superblock from global heap\n");
+
+			//globalHeap->using -= sbForTransfer->using;
 			currentHeap->using += sbForTransfer->using;
 
-			globalHeap->all -= SUPERBLOCK_SIZE;
+			//globalHeap->all -= SUPERBLOCK_SIZE;
 			currentHeap->all += SUPERBLOCK_SIZE;
 
 			/* add the superblock to the current heap */
@@ -431,10 +460,16 @@ void * malloc2 (size_t sz)
 		} else {
 			/* if not, create one */
 
+			EXTDBGPRINTF("we didnt find superblock from global heap\n");
+
+			DBGPRINTF("unlock global heap\n");
+
 			// unlock global heap
 			// do it now for saving time before allocating memory non related to the global heap
 			pthread_mutex_unlock(&globalHeap->mutex);
 			unlockedGlobalHeap = 1;
+
+			DBGPRINTF("unlocked global heap\n");
 
 
 			pSuperblock newSuperblock = createNewSuperblock(currentHeap);
@@ -454,9 +489,19 @@ void * malloc2 (size_t sz)
 		// this check is for not unlock the global heap twice
 		// we do this for keep the fast unlock of the global heap as we can
 		if (unlockedGlobalHeap == 0) {
+
+			DBGPRINTF("unlock global heap\n");
+
 			// unlock global heap
 			pthread_mutex_unlock(&globalHeap->mutex);
+
+			DBGPRINTF("unlocked global heap\n");
 		}
+	}
+
+	EXTDBGPRINTF("got free superblock %d, using %d\n", (int)superblock, superblock->using);
+	if (superblock->freeList != NULL) {
+		EXTDBGPRINTF("next free space of superblock %d is %d", (int)superblock, superblock->freeList->chunkSize);
 	}
 
 
@@ -465,12 +510,18 @@ void * malloc2 (size_t sz)
 
 	currentHeap->using += currentSizeClassPadded;
 
+
+	DBGPRINTF("unlock heap %d\n", currentHeapI);
+
 	// unlock heap i
 	pthread_mutex_unlock(&currentHeap->mutex);
 
+	DBGPRINTF("unlocked heap %d\n", currentHeapI);
+
+
 	DBGPRINTF("end mymalloc\n");
 
-	return (block + sizeof(BlockHeader));
+	return (void*)((void*)block + sizeof(BlockHeader));
 }
 
 
@@ -481,7 +532,7 @@ void free2 (void * ptr)
 
 	DBGPRINTF("start myfree\n");
 
-	pBlockHeader blockHeader = (pBlockHeader)(ptr - sizeof(BlockHeader));
+	pBlockHeader blockHeader = (pBlockHeader)((void*)ptr - sizeof(BlockHeader));
 
 	unsigned int sizeToRemove = blockHeader->mSize;
 
@@ -493,18 +544,23 @@ void free2 (void * ptr)
 		     perror(NULL);
 		     return;
 		}
-
 	}
 
 	pSuperblock superblockBelongs = blockHeader->superblockBelongs;
 	pHeap heapBelongs = superblockBelongs->heapBelongs;
 
+
+	DBGPRINTF("lock heap %d\n", (int)heapBelongs);
+
 	// lock the heap
 	pthread_mutex_lock(&heapBelongs->mutex);
 
-	/* dealock from superblock */
+	DBGPRINTF("locked heap %d\n", (int)heapBelongs);
+
+
+	/* dealloc from superblock */
 	pBlockHeaderNode blockHeaderNode = (pBlockHeaderNode)(blockHeader - sizeof(BlockHeaderNode));
-	blockHeaderNode->chunkSize += sizeToRemove;
+	blockHeaderNode->chunkSize = sizeToRemove;
 
 	// return the node to the free list
 	blockHeaderNode->next = superblockBelongs->freeList;
@@ -516,8 +572,13 @@ void free2 (void * ptr)
 
 	/* check if we dealing with the global heap */
 	if (heapBelongs == globalHeap) {
+
+		DBGPRINTF("unlock heap %d\n", (int)heapBelongs);
+
 		// unlock the heap (current == global)
 		pthread_mutex_unlock(&heapBelongs->mutex);
+
+		DBGPRINTF("unlocked heap %d\n", (int)heapBelongs);
 
 		return;
 	}
@@ -531,14 +592,20 @@ void free2 (void * ptr)
 		int currentSizeClass;
 		int currentSizeClassPadded;
 
+		//int updatedSize = sizeToRemove + sizeof(BlockHeaderNode) + sizeof(BlockHeader);
+
 		getCurrentSizeClass(sizeToRemove, &currentSizeClass, &currentSizeClassPadded);
 
 		pSuperblock superblockToMove = getTheMostEmptySuperblock(heapBelongs, currentSizeClass);
 		transferSuperblock(globalHeap, superblockToMove, currentSizeClass);
 	}
 
+	DBGPRINTF("unlock heap %d\n", (int)heapBelongs);
+
 	// unlock the heap
 	pthread_mutex_unlock(&heapBelongs->mutex);
+
+	DBGPRINTF("unlocked heap %d\n", (int)heapBelongs);
 
 	DBGPRINTF("done myfree\n");
 	

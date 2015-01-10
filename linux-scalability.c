@@ -71,13 +71,13 @@ main (int argc, char *argv[])
   printf ("Object size: %ld, Iterations: %ld, Threads: %u\n",
 	  size, iteration_count, thread_count);
 
-  executionTime = (double *) malloc2 (sizeof(double) * thread_count);
+  executionTime = (double *) malloc (sizeof(double) * thread_count);
   pthread_barrier_init (&barrier, NULL, thread_count);
 
   /*          * Invoke the tests          */
   printf ("Starting test...\n");
   for (i = 0; i < thread_count; i++) {
-    int * tid = (int *) malloc2(sizeof(int));
+    int * tid = (int *) malloc(sizeof(int));
     *tid = i;
     pthread_attr_t attr;
     pthread_attr_init (&attr);
@@ -159,8 +159,8 @@ run_test (void * arg)
     {
       register void *buf;
 
-      buf = malloc2 (request_size);
-      free2 (buf);
+      buf = malloc (request_size);
+      free (buf);
     }
 
   gettimeofday (&end, NULL);

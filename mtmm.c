@@ -362,7 +362,7 @@ pSuperblock getTheMostEmptySuperblock(pHeap fromHeap, unsigned int sizeClassNum)
 	return currentMinFullnessSuperblock;
 }
 
-void * malloc2 (size_t sz)
+void * malloc (size_t sz)
 {
 	DBGPRINTF2V("start mymalloc - %d\n", (unsigned int)sz);
 
@@ -538,7 +538,7 @@ void * malloc2 (size_t sz)
 
 
 
-void free2 (void * ptr)
+void free (void * ptr)
 {
 	if (ptr == NULL) return;
 
@@ -627,14 +627,14 @@ void free2 (void * ptr)
 	
 }
 
-void * realloc2 (void * ptr, size_t sz)
+void * realloc (void * ptr, size_t sz)
 {
 	DBGPRINTF("myrealloc\n");
 
-	if (ptr == NULL) return malloc2(sz);
+	if (ptr == NULL) return malloc(sz);
 
 	if (sz == 0) {
-		free2(ptr);
+		free(ptr);
 		return NULL;
 	}
 
@@ -642,16 +642,24 @@ void * realloc2 (void * ptr, size_t sz)
 
 	unsigned int minimumSize = header->mSize < sz ? header->mSize: sz;
 
-	void* ptrNew = malloc2(minimumSize);
+	void* ptrNew = malloc(minimumSize);
 
 	memcpy(ptrNew, ptr, minimumSize);
 
-	free2(ptr);
+	free(ptr);
 
 	return ptrNew;
 
 
-	return malloc2(sz);
+	return malloc(sz);
+}
+
+void * calloc (size_t n, size_t size)
+{
+	size_t total = n * size;
+	void *p = malloc(total);
+	if (!p) return NULL;
+	return memset(p, 0, total);
 }
 
 

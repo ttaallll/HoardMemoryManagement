@@ -80,6 +80,8 @@ typedef struct sHeap
   unsigned int using;
   unsigned int all;
 
+  pthread_mutex_t mutex;
+
 } Heap, *pHeap;
 
 typedef struct sHoard
@@ -96,10 +98,16 @@ void initHoard() {
 
 	if (hoardIsInitialized == 1) return;
 
-	int i, j;
+	int i, j, r;
 
 	hoard.globalHeap.all = 0;
 	hoard.globalHeap.using = 0;
+
+	r = pthread_mutex_init(&hoard.globalHeap.mutex, NULL);
+	if (r) {
+		perror(NULL);
+		return;
+	}
 	for (j = 0; j < NUMOFSIZECLASSES; ++j) {
 		hoard.globalHeap.sizeClass[j].numOfSuperBlocks = 0;
 		hoard.globalHeap.sizeClass[j].size = pow(SIZECLASSBASE, j);
@@ -109,6 +117,12 @@ void initHoard() {
 	for (i = 0; i < NUMOFHEAPS; ++i) {
 		hoard.heaps[i].all = 0;
 		hoard.heaps[i].using = 0;
+
+		r = pthread_mutex_init(&hoard.heaps[i].mutex, NULL);
+		if (r) {
+			perror(NULL);
+			return;
+		}
 		for (j = 0; j < NUMOFSIZECLASSES; ++j) {
 			hoard.heaps[i].sizeClass[j].numOfSuperBlocks = 0;
 			hoard.heaps[i].sizeClass[j].size = pow(SIZECLASSBASE, j);
@@ -156,16 +170,20 @@ int getCurrentHeapI() {
 }
 
 Superblock* getMostFullnessSuperblock(pSizeClass sc, unsigned int sizeNeedToAllocate) {
-	int currentMaxFullnessValue = 0;
+	//int currentMaxFullnessValue = 0;
 	pSuperblock currentMaxFullnessSuperblock = NULL;
+	pSuperblock currentSuperblock;
 	int i;
 
 	if (sc->numOfSuperBlocks == 0) {
 		return NULL;
 	}
 
-	for (i = 0; i < sc->numOfSuperBlocks; ++i) {
-		pSuperblock currentSuperblock = &sc->superblocks[i];
+	currentSuperblock = sc->superblocks;
+	if (SUPERBLOCK_SIZE - currentSuperblock->using >= sizeNeedToAllocate) return currentSuperblock;
+
+	for (i = 1; i < sc->numOfSuperBlocks; ++i) {
+		currentSuperblock = currentSuperblock->next;
 
 		/* first check that the superblock have space for the new block */
 		if (SUPERBLOCK_SIZE - currentSuperblock->using >= sizeNeedToAllocate) {
@@ -204,11 +222,14 @@ pBlockHeader allocateFromSuperblock(pSuperblock superblock, unsigned int sizeAll
 	return newBlock;
 }
 
-pSuperblock getFreeSuperblock(pSizeClass scGlobal) {
+pSuperblock getFreeSuperblockFromGlobal(pSizeClass scGlobal) {
 	if (scGlobal->numOfSuperBlocks > 0) {
 
 		scGlobal->superblocks = scGlobal->superblocks->next; // this is for removing the superblock from global, for not mistaken using it twice
-		scGlobal->numOfSuperBlocks -= 1;
+		scGlobal->numOfSuperBlocks--;
+
+		globalHeap->all -= SUPERBLOCK_SIZE;
+		globalHeap->using -= scGlobal->superblocks->using;
 
 		return scGlobal->superblocks;
 	}
@@ -238,6 +259,76 @@ pSuperblock createNewSuperblock(pHeap heapBelongs) {
 	newSuperblock->freeList->next = NULL;
 
 	return newSuperblock;
+}
+
+/* add the superblock to the heap */
+void transferSuperblock(pHeap toHeap, pSuperblock superblockToMove, int sizeClass) {
+
+	// lock heap toHeap
+	pthread_mutex_lock(&toHeap->mutex);
+
+	toHeap->sizeClass[sizeClass].numOfSuperBlocks++;
+
+	// add to link list
+	superblockToMove->next = toHeap->sizeClass[sizeClass].superblocks;
+	toHeap->sizeClass[sizeClass].superblocks = superblockToMove;
+
+	toHeap->all += SUPERBLOCK_SIZE;
+	toHeap->using += superblockToMove->using;
+
+	// unlock heap toHeap
+	pthread_mutex_unlock(&toHeap->mutex);
+}
+
+/* this function removes superblock from the heap and return it, it gives the minimum allocated superblock */
+pSuperblock getTheMostEmptySuperblock(pHeap fromHeap, unsigned int sizeClassNum) {
+
+	int currentMinFullnessValue;
+	pSuperblock currentMinFullnessSuperblock;
+	pSuperblock previousMinFullnessSuperblock;
+	pSuperblock currentSuperblock;
+	pSuperblock previousSuperblock;
+	int i;
+
+	pSizeClass sizeClass = &fromHeap->sizeClass[sizeClassNum];
+
+	if (sizeClass->numOfSuperBlocks == 0) {
+		return NULL;
+	}
+
+	currentMinFullnessValue = sizeClass->superblocks->using;
+	currentMinFullnessSuperblock = sizeClass->superblocks;
+
+	currentSuperblock = sizeClass->superblocks;
+	previousSuperblock = NULL;
+
+	for (i = 1; i < sizeClass->numOfSuperBlocks; ++i) {
+		previousSuperblock = currentSuperblock;
+		currentSuperblock = currentSuperblock->next;
+
+		/* check who is the minimum */
+		if (currentSuperblock->using < currentMinFullnessValue) {
+			currentMinFullnessValue = currentSuperblock->using;
+			currentMinFullnessSuperblock = currentSuperblock;
+			previousMinFullnessSuperblock = previousSuperblock;
+		}
+	}
+
+	fromHeap->all -= SUPERBLOCK_SIZE;
+	fromHeap->using -= currentMinFullnessSuperblock->using;
+
+	/* remove superblock from the linked list */
+	if (previousMinFullnessSuperblock == NULL) {
+		/* we have only one superblock, remove it from heap */
+		sizeClass->numOfSuperBlocks = 0;
+		sizeClass->superblocks = NULL;
+	} else {
+		/* remove the pointer from previous node */
+		sizeClass->numOfSuperBlocks--;
+		previousMinFullnessSuperblock->next = currentMinFullnessSuperblock->next;
+	}
+
+	return currentMinFullnessSuperblock;
 }
 
 void * malloc2 (size_t sz)
@@ -288,6 +379,7 @@ void * malloc2 (size_t sz)
 	DBGPRINTF("lock heap %d\n", currentHeapI);
 
 	// lock heap i
+	pthread_mutex_lock(&currentHeap->mutex);
 
 	DBGPRINTF("heap %d locked\n", currentHeapI);
 
@@ -312,12 +404,13 @@ void * malloc2 (size_t sz)
 		/* check if we have available from global */
 
 		// lock global heap
+		pthread_mutex_lock(&globalHeap->mutex);
 
 		char unlockedGlobalHeap = 0; // boolean for know if we unlocked the global heap
 
 
 		SizeClass* scGlobal = getSizeClass(globalHeap, currentSizeClass);
-		pSuperblock sbForTransfer = getFreeSuperblock(scGlobal);
+		pSuperblock sbForTransfer = getFreeSuperblockFromGlobal(scGlobal);
 
 		if (sbForTransfer != NULL) {
 			globalHeap->using -= sbForTransfer->using;
@@ -326,12 +419,21 @@ void * malloc2 (size_t sz)
 			globalHeap->all -= SUPERBLOCK_SIZE;
 			currentHeap->all += SUPERBLOCK_SIZE;
 
+			/* add the superblock to the current heap */
+			sbForTransfer->next = currentHeap->sizeClass[currentSizeClass].superblocks;
+			currentHeap->sizeClass[currentSizeClass].superblocks = sbForTransfer;
+
+			currentHeap->sizeClass[currentSizeClass].numOfSuperBlocks++;
+
+			superblock = sbForTransfer;
+
 
 		} else {
 			/* if not, create one */
 
 			// unlock global heap
 			// do it now for saving time before allocating memory non related to the global heap
+			pthread_mutex_unlock(&globalHeap->mutex);
 			unlockedGlobalHeap = 1;
 
 
@@ -353,6 +455,7 @@ void * malloc2 (size_t sz)
 		// we do this for keep the fast unlock of the global heap as we can
 		if (unlockedGlobalHeap == 0) {
 			// unlock global heap
+			pthread_mutex_unlock(&globalHeap->mutex);
 		}
 	}
 
@@ -363,6 +466,7 @@ void * malloc2 (size_t sz)
 	currentHeap->using += currentSizeClassPadded;
 
 	// unlock heap i
+	pthread_mutex_unlock(&currentHeap->mutex);
 
 	DBGPRINTF("end mymalloc\n");
 
@@ -396,6 +500,7 @@ void free2 (void * ptr)
 	pHeap heapBelongs = superblockBelongs->heapBelongs;
 
 	// lock the heap
+	pthread_mutex_lock(&heapBelongs->mutex);
 
 	/* dealock from superblock */
 	pBlockHeaderNode blockHeaderNode = (pBlockHeaderNode)(blockHeader - sizeof(BlockHeaderNode));
@@ -411,10 +516,29 @@ void free2 (void * ptr)
 
 	/* check if we dealing with the global heap */
 	if (heapBelongs == globalHeap) {
-		// unlock global heap
+		// unlock the heap (current == global)
+		pthread_mutex_unlock(&heapBelongs->mutex);
 
-
+		return;
 	}
+
+	/* we are not in the global */
+	/* check if the heap is almost empty */
+
+	if ((heapBelongs->using < heapBelongs->all - K * SUPERBLOCK_SIZE) &&
+			(heapBelongs->using < (1 - f) * heapBelongs->all)) {
+
+		int currentSizeClass;
+		int currentSizeClassPadded;
+
+		getCurrentSizeClass(sizeToRemove, &currentSizeClass, &currentSizeClassPadded);
+
+		pSuperblock superblockToMove = getTheMostEmptySuperblock(heapBelongs, currentSizeClass);
+		transferSuperblock(globalHeap, superblockToMove, currentSizeClass);
+	}
+
+	// unlock the heap
+	pthread_mutex_unlock(&heapBelongs->mutex);
 
 	DBGPRINTF("done myfree\n");
 	
